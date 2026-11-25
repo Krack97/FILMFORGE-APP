@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Range
+import android.util.Size
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -20,6 +21,9 @@ import android.widget.*
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.media3.effect.Media3Effect
 import androidx.camera.video.*
@@ -48,6 +52,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var switchLens: Button
     private lateinit var modeButton: Button
     private lateinit var permissionButton: Button
+    private lateinit var photoSpeedButton: Button
     private lateinit var exposure: SeekBar
     private lateinit var recipeRow: LinearLayout
     private var provider: ProcessCameraProvider? = null
@@ -62,6 +67,7 @@ class MainActivity : ComponentActivity() {
     private var videoMode = true
     private var front = false
     private var selectedRecipe = 0
+    private var responsiveFrontPhoto = true
     private var lastMedia: Uri? = null
     private val recipes = listOf("Original", "Amber 35", "Silver", "Night Blue", "Soft Cinema")
 
@@ -81,6 +87,7 @@ class MainActivity : ComponentActivity() {
         front = savedInstanceState?.getBoolean("front") ?: false
         videoMode = savedInstanceState?.getBoolean("video") ?: true
         selectedRecipe = savedInstanceState?.getInt("recipe") ?: 0
+        responsiveFrontPhoto = getPreferences(MODE_PRIVATE).getBoolean("responsiveFrontPhoto", true)
         buildInterface()
         if (hasCamera()) openCamera()
         else permissions.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
@@ -144,11 +151,26 @@ class MainActivity : ComponentActivity() {
         }
         recipes.forEachIndexed { index, name ->
             recipeRow.addView(button(name) {
+                // Original uses the direct camera path for front photos.
+                // Rebind only when crossing between direct and film processing.
+                val needsRebind = front && !videoMode && (selectedRecipe == 0) != (index == 0)
                 selectedRecipe = index
-                applyRecipe()
+                if (needsRebind) bindCamera() else applyRecipe()
             })
         }
         root.addView(scroll)
+        photoSpeedButton = button("Selfie: Responsive") {
+            if (!busy()) {
+                responsiveFrontPhoto = !responsiveFrontPhoto
+                getPreferences(MODE_PRIVATE).edit()
+                    .putBoolean("responsiveFrontPhoto", responsiveFrontPhoto).apply()
+                bindCamera()
+            }
+        }.apply {
+            visibility = View.GONE
+            contentDescription = "Selfie photo quality: Responsive reduces resolution; Detail uses camera defaults"
+        }
+        root.addView(photoSpeedButton)
         val exposureRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         exposureRow.addView(text("EV", 12f))
         exposure = SeekBar(this).apply { isEnabled = false; contentDescription = "Exposure compensation" }
@@ -223,17 +245,30 @@ class MainActivity : ComponentActivity() {
             }
             activeProvider.unbindAll()
             effect?.close()
-            val mediaEffect = Media3Effect(this,
-                CameraEffect.PREVIEW or CameraEffect.VIDEO_CAPTURE or CameraEffect.IMAGE_CAPTURE,
-                executor
-            ) { error -> fail("Film processing failed; reopen camera", error) }
-            effect = mediaEffect
+            effect = null
+            val frontPhoto = front && !videoMode
+            // SurfaceView avoids the extra TextureView composition when supported.
+            // CameraX automatically falls back on devices that require TextureView.
+            preview.implementationMode = if (frontPhoto)
+                PreviewView.ImplementationMode.PERFORMANCE
+                else PreviewView.ImplementationMode.COMPATIBLE
+            if (!(frontPhoto && selectedRecipe == 0)) {
+                effect = Media3Effect(this,
+                    CameraEffect.PREVIEW or CameraEffect.VIDEO_CAPTURE or CameraEffect.IMAGE_CAPTURE,
+                    executor
+                ) { error -> fail("Film processing failed; reopen camera", error) }
+            }
             applyRecipe()
             val rotation = preview.display?.rotation ?: android.view.Surface.ROTATION_0
-            val viewfinder = Preview.Builder().setTargetRotation(rotation).build().also {
+            val previewBuilder = Preview.Builder().setTargetRotation(rotation)
+            if (frontPhoto && responsiveFrontPhoto) {
+                previewBuilder.setResolutionSelector(frontPhotoResolution(Size(960, 720), 1_300_000L))
+            }
+            val viewfinder = previewBuilder.build().also {
                 it.setSurfaceProvider(preview.surfaceProvider)
             }
-            val group = UseCaseGroup.Builder().addUseCase(viewfinder).addEffect(mediaEffect)
+            val group = UseCaseGroup.Builder().addUseCase(viewfinder)
+            effect?.let { group.addEffect(it) }
             if (videoMode) {
                 val recorder = Recorder.Builder().setQualitySelector(
                     QualitySelector.from(Quality.FHD, FallbackStrategy.lowerQualityOrHigherThan(Quality.FHD))
@@ -244,9 +279,15 @@ class MainActivity : ComponentActivity() {
                 imageCapture = null
                 group.addUseCase(video)
             } else {
-                val photo = ImageCapture.Builder()
+                val photoBuilder = ImageCapture.Builder()
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                    .setTargetRotation(rotation).build()
+                    .setTargetRotation(rotation)
+                if (frontPhoto && responsiveFrontPhoto) {
+                    // The photo and preview share the live effects stream.
+                    // Limit its pixel load explicitly in Responsive mode.
+                    photoBuilder.setResolutionSelector(frontPhotoResolution(Size(1600, 1200), 2_100_000L))
+                }
+                val photo = photoBuilder.build()
                 imageCapture = photo
                 videoCapture = null
                 group.addUseCase(photo)
@@ -257,11 +298,30 @@ class MainActivity : ComponentActivity() {
             shutter.text = if (videoMode) "Record" else "Shoot"
             modeButton.text = if (videoMode) "VIDEO" else "PHOTO"
             status.text = "Ready • ${recipes[selectedRecipe]}"
+            photoSpeedButton.visibility = if (frontPhoto) View.VISIBLE else View.GONE
+            photoSpeedButton.text = if (responsiveFrontPhoto)
+                "Selfie: Responsive (up to 2 MP) • tap for Detail"
+                else "Selfie: Detail • tap for Responsive"
+            val outputSize = imageCapture?.resolutionInfo?.resolution
+            val sizeLabel = outputSize?.let { " • ${it.width}×${it.height}" } ?: ""
             details.text = (if (front) "Front" else "Rear") +
                 if (videoMode) " • 1080p / 30 target • " + if (hasAudio()) "Mic on" else "Silent"
-                else " • JPEG • Film look baked in"
+                else sizeLabel + if (selectedRecipe == 0) " • Original" else " • Film look baked in"
         } catch (error: Exception) { fail("Camera setup failed", error) }
     }
+
+    private fun frontPhotoResolution(preferred: Size, maxPixels: Long): ResolutionSelector =
+        ResolutionSelector.Builder()
+            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+            .setResolutionStrategy(ResolutionStrategy(preferred,
+                ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
+            .setResolutionFilter { supported, _ ->
+                val bounded = supported.filter { it.width.toLong() * it.height <= maxPixels }
+                // Keep CameraX's order and support a camera with no small output.
+                if (bounded.isNotEmpty()) bounded
+                else supported.minByOrNull { it.width.toLong() * it.height }?.let { listOf(it) }
+                    ?: emptyList()
+            }.build()
 
     private fun configureExposure() {
         val boundCamera = camera ?: return
@@ -318,6 +378,7 @@ class MainActivity : ComponentActivity() {
     private fun setControlsLocked(locked: Boolean) {
         switchLens.isEnabled = !locked
         modeButton.isEnabled = !locked
+        photoSpeedButton.isEnabled = !locked
         for (index in 0 until recipeRow.childCount) recipeRow.getChildAt(index).isEnabled = !locked
     }
 
