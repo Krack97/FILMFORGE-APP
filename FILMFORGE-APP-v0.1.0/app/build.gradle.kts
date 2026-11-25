@@ -31,14 +31,15 @@ dependencies {
     implementation("androidx.media3:media3-effect:1.7.1")
 }
 
-val modelAsset = layout.projectDirectory.file("src/main/assets/super-resolution.onnx")
+val modelAsset = layout.buildDirectory.file("models/super-resolution-source.onnx")
 val prepareNeuralAssets = tasks.register("prepareNeuralAssets") {
     outputs.file(modelAsset)
     outputs.file(layout.projectDirectory.file("src/main/assets/ONNX-MODEL-LICENSE.txt"))
     outputs.file(layout.projectDirectory.file("src/main/assets/ONNX-RUNTIME-LICENSE.txt"))
     doLast {
-        val target = modelAsset.asFile
+        val target = modelAsset.get().asFile
         target.parentFile.mkdirs()
+        layout.projectDirectory.dir("src/main/assets").asFile.mkdirs()
         val expected = "85f36ff88cc504a24af5e0602148bc56a8aa09a58eca8c0da2756f3e8186035e"
         if (!target.exists() || MessageDigest.getInstance("SHA-256").digest(target.readBytes()).joinToString("") { "%02x".format(it) } != expected) {
             URI("https://media.githubusercontent.com/media/onnx/models/main/validated/vision/super_resolution/sub_pixel_cnn_2016/model/super-resolution-10.onnx")
@@ -76,3 +77,10 @@ val prepareNeuralAssets = tasks.register("prepareNeuralAssets") {
     }
 }
 tasks.named("preBuild").configure { dependsOn(prepareNeuralAssets) }
+tasks.named("preBuild").configure {
+    doLast {
+        check(layout.projectDirectory.file("src/main/assets/super-resolution.onnx").asFile.exists()) {
+            "Prepare the dynamic neural model with the GitHub Actions workflow before assembling."
+        }
+    }
+}
