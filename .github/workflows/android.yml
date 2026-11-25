@@ -32,21 +32,49 @@ jobs:
         with:
           path: ~/.android/debug.keystore
           key: filmforge-development-signing-v1
-      - name: Build and check
+      - name: Fetch verified neural source and notices
         working-directory: FILMFORGE-APP-v0.1.0
-        run: gradle --no-daemon :app:assembleDebug :app:lintDebug
+        run: gradle --no-daemon :app:prepareNeuralAssets
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Validate bundled neural model
         working-directory: FILMFORGE-APP-v0.1.0
         run: |
-          pip install onnxruntime==1.20.1 numpy==2.1.3
+          pip install onnx==1.17.0 onnxruntime==1.20.1 numpy==2.1.3
           python - <<'PY'
-          import hashlib, pathlib, numpy as np, onnxruntime as ort
-          path=pathlib.Path("app/src/main/assets/super-resolution.onnx")
-          assert hashlib.sha256(path.read_bytes()).hexdigest()=="85f36ff88cc504a24af5e0602148bc56a8aa09a58eca8c0da2756f3e8186035e"
-          session=ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+          import hashlib, json, pathlib, numpy as np, onnx, onnxruntime as ort
+          from onnx import helper, TensorProto
+          source=pathlib.Path("app/build/models/super-resolution-source.onnx")
+          digest=hashlib.sha256(source.read_bytes()).hexdigest()
+          assert digest=="85f36ff88cc504a24af5e0602148bc56a8aa09a58eca8c0da2756f3e8186035e"
+          original=onnx.load(str(source))
+          conv=[n for n in original.graph.node if n.op_type=="Conv"]
+          assert len(conv)==4, "Unexpected neural architecture"
+          last=conv[-1]
+          nodes=[]
+          for node in original.graph.node:
+              nodes.append(node)
+              if node.output[0] == last.output[0]:
+                  break
+          # Preserve every trained convolution/activation; replace only fixed-shape pixel shuffle.
+          nodes.append(helper.make_node("DepthToSpace",[last.output[0]],["reconstructed_y"],blocksize=3))
+          graph=helper.make_graph(nodes,"FilmForgeDynamicSubPixelCNN",
+              [helper.make_tensor_value_info(original.graph.input[0].name,TensorProto.FLOAT,[1,1,"height","width"])],
+              [helper.make_tensor_value_info("reconstructed_y",TensorProto.FLOAT,[1,1,"out_height","out_width"])],
+              initializer=list(original.graph.initializer))
+          adapted=helper.make_model(graph,opset_imports=list(original.opset_import))
+          adapted.ir_version=original.ir_version
+          onnx.checker.check_model(adapted)
+          assets=pathlib.Path("app/src/main/assets");assets.mkdir(parents=True,exist_ok=True)
+          path=assets/"super-resolution.onnx";onnx.save(adapted,str(path))
+          baseline=ort.InferenceSession(str(source),providers=["CPUExecutionProvider"])
+          session=ort.InferenceSession(str(path),providers=["CPUExecutionProvider"])
+          reference=np.random.default_rng(7).random((1,1,224,224),dtype=np.float32)
+          old=baseline.run(None,{baseline.get_inputs()[0].name:reference})[0]
+          new=session.run(None,{session.get_inputs()[0].name:reference})[0]
+          error=float(np.max(np.abs(old-new)))
+          assert error<1e-4, ("Pixel shuffle conversion changed predictions",error)
           for h,w in [(96,128),(72,128),(128,72)]:
               data=np.random.default_rng(42).random((1,1,h,w),dtype=np.float32)
               out=session.run(None,{session.get_inputs()[0].name:data})[0]
@@ -54,8 +82,16 @@ jobs:
               assert np.isfinite(out).all()
               nearest=np.repeat(np.repeat(data,3,axis=2),3,axis=3)
               assert np.mean(np.abs(out-nearest))>1e-5
-              print("Neural x3 inference passed", data.shape, out.shape)
+              print("Neural x3 inference passed",data.shape,out.shape)
+          (assets/"MODEL-PROVENANCE.json").write_text(json.dumps({
+              "source_sha256":digest,"adapted_sha256":hashlib.sha256(path.read_bytes()).hexdigest(),
+              "change":"Dynamic input/output layout and equivalent DepthToSpace pixel shuffle; trained weights unchanged",
+              "maximum_prediction_difference_at_224":error},indent=2))
+          print("Original/adapted maximum prediction difference:",error)
           PY
+      - name: Build and check
+        working-directory: FILMFORGE-APP-v0.1.0
+        run: gradle --no-daemon :app:assembleDebug :app:lintDebug
       - name: Enable accelerated Android test device
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
