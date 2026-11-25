@@ -64,6 +64,15 @@ class FilmEngineDeviceTest {
                     assertEquals(out.get(0),out.get(1));assertEquals(out.get(1),out.get(2))
                 }
             }
+            // Exercise model inference, GPU readback and neural-residual compositing together.
+            // This correctness test deliberately overrides only the emulator's speed gate.
+            neural.prepare()
+            neural.ready=true
+            state.aiEnabled=true
+            state.recipe=FilmRecipe("Original")
+            shader.drawFrame(texture[0],time+33_333L)
+            assertEquals("AI compositing GL error",GLES20.GL_NO_ERROR,GLES20.glGetError())
+            assertTrue("AI inference was not executed",state.aiMs>0.0)
         }finally{
             shader.release();neural.close()
             GLES20.glDeleteTextures(1,texture,0)
