@@ -69,6 +69,8 @@ class MainActivity : ComponentActivity() {
     private var selectedRecipe = 0
     private var responsiveFrontPhoto = true
     private var lastMedia: Uri? = null
+    private var lastVideoSize: Size? = null
+    private var previewStreamSize: Size? = null
     private val filmState = FilmState()
     private val neural by lazy { NeuralDetail(applicationContext) }
     private val aiWorker = java.util.concurrent.Executors.newSingleThreadExecutor()
@@ -366,7 +368,9 @@ class MainActivity : ComponentActivity() {
             photoSpeedButton.text = if (responsiveFrontPhoto)
                 "Selfie: Responsive (up to 2 MP) • tap for Detail"
                 else "Selfie: Detail • tap for Responsive"
-            val outputSize = if(videoMode)videoCapture?.resolutionInfo?.resolution
+            previewStreamSize=viewfinder.resolutionInfo?.resolution
+            lastVideoSize=null
+            val outputSize = if(videoMode)lastVideoSize
                 else imageCapture?.resolutionInfo?.resolution
             val sizeLabel = outputSize?.let { " • ${it.width}×${it.height}" } ?: ""
             frameButton.text=if(nativeFrame)"Frame: Sensor ratio" else "Frame: 16:9"
@@ -606,11 +610,11 @@ class MainActivity : ComponentActivity() {
         val map=c?.get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
         fun sizes(format:Int)=map?.getOutputSizes(format)?.take(16)?.joinToString { "${it.width}×${it.height}" }?:"Not exposed"
         val capabilities=c?.get(android.hardware.camera2.CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)?:intArrayOf()
-        val output=(if(videoMode)videoCapture?.resolutionInfo else imageCapture?.resolutionInfo)?.resolution
+        val output=if(videoMode)lastVideoSize else imageCapture?.resolutionInfo?.resolution
         val report="FILMFORGE 0.2.0 • ${android.os.Build.MODEL}\n"+
             "Camera: ${if(front)"front" else "rear"}\n"+
             "Sensor active array: ${active?.width()}×${active?.height()}\n"+
-            "Reported crop: $lastCrop\nOutput: $output\n"+
+            "Reported crop: $lastCrop\nPreview stream: $previewStreamSize\nOutput: $output (video dimensions available after saving a clip)\n"+
             "Manual exposure: ${hasManual(c)}\nRAW exposed: ${capabilities.contains(3)}\n"+
             "JPEG sizes: ${sizes(android.graphics.ImageFormat.JPEG)}\n"+
             "YUV sizes: ${sizes(android.graphics.ImageFormat.YUV_420_888)}\n\n"+
@@ -744,6 +748,7 @@ class MainActivity : ComponentActivity() {
                         shutter.isEnabled = camera != null
                         if (!event.hasError()) {
                             lastMedia = event.outputResults.outputUri
+                            inspectSavedVideo(event.outputResults.outputUri)
                             status.text = "Saved to Movies/FILMFORGE"
                         } else {
                             status.text = "Recording failed (${event.error}); check storage and retry"
@@ -756,6 +761,27 @@ class MainActivity : ComponentActivity() {
             requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             setControlsLocked(false)
             fail("Recording failed", error)
+        }
+    }
+
+
+    private fun inspectSavedVideo(uri:Uri){
+        aiWorker.execute{
+            val size=try{
+                val retriever=android.media.MediaMetadataRetriever()
+                try{
+                    retriever.setDataSource(this,uri)
+                    val w=retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+                    val h=retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
+                    if(w!=null && h!=null)Size(w,h) else null
+                }finally{retriever.release()}
+            }catch(_:Exception){null}
+            runOnUiThread{
+                if(!isDestroyed && videoMode && lastMedia==uri){
+                    lastVideoSize=size
+                    if(size!=null)details.text="Saved video: ${size.width}×${size.height} • See Sensor / info"
+                }
+            }
         }
     }
 
@@ -898,7 +924,7 @@ class NeuralDetail(private val context: android.content.Context) : AutoCloseable
                 check(shape.contentEquals(longArrayOf(1,1,(h*3).toLong(),(w*3).toLong()))) {
                     "Unexpected neural model output"
                 }
-                return FloatArray(w*h*9).also { out.floatBuffer.get().get(it) }
+                return FloatArray(w*h*9).also { out.floatBuffer.get(it) }
             }
         }
     }
