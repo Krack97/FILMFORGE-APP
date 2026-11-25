@@ -1,36 +1,53 @@
-# FILMFORGE
+# FILMFORGE 0.2
 
-Native Android film-look camera. First device target: Samsung Galaxy Tab A9 (SM-X115). Android 10+.
+Native Android camera with live film processing and baked-in JPEG/MP4 output. Developed for Samsung Galaxy Tab A9 and Galaxy A23; physical-device validation is still required for new 0.2 features.
 
-## First version
-- Live color recipes: Original, Amber 35, Silver, Night Blue, Soft Cinema.
-- The same Media3 color effects feed preview and saved videos/photos.
-- Photo and video modes, front/rear cameras, tap-to-focus, exposure compensation.
-- Video targets 1080p/30fps, falling back to supported quality; actual capability depends on the camera.
-- Optional microphone; camera works when microphone permission is denied.
-- Photos go to Pictures/FILMFORGE; videos to Movies/FILMFORGE.
-- No account, no network permission, no uploaded footage.
+## Available in 0.2
+- Twelve looks: Original, Portra 400, Portra 800, 800T, Gold 200, Classic Chrome, Vision3 500T, HP5, Amber 35, Silver, Night Blue, Soft Cinema.
+- Film looks are creative interpretations, not calibrated or licensed film-stock emulations.
+- One live GPU shader handles contrast, saturation, warmth/tint, faded blacks, grain, highlight softness, shadow lift, halation, vignette, edge-preserving spatial denoise, skin-color protection and motion blending.
+- Recipe Creator: edit live, save locally, copy/import recipe JSON.
+- Manual ISO/shutter, white-balance presets and focus when exposed by the selected camera. Auto exposure and EV remain available on other cameras.
+- Front-photo Responsive/Detail profiles and a direct Original path.
+- Portrait/landscape layouts; front/rear cameras; tap focus; optional microphone.
+- JPEGs: Pictures/FILMFORGE. Videos: Movies/FILMFORGE.
 
-## Get the APK without Android Studio
-1. Open the repository's Actions tab.
-2. Open the latest successful **Build Android APK** run.
-3. Download **FILMFORGE-Android** under Artifacts and unzip it.
-4. Copy app-debug.apk to the tablet and install it.
+## Live AI detail: real model, bounded scope
+The bundled ONNX Model Zoo sub-pixel CNN reconstructs luminance at three times its small input dimensions. FILMFORGE analyses live frames at up to 128 pixels on the long edge, then blends the learned detail residual into the original full-size frame. It retains the source dimensions and preserves original fine detail rather than replacing the whole frame with a small AI image.
 
-This is a development APK, not a Play Store release. Physical camera, audio, rotation and performance testing is required on the tablet. Recipe rendering uses Google's experimental CameraX Media3 adapter.
+This is experimental single-frame neural detail assistance. It is **not full-resolution super-resolution, 8–15 frame reconstruction, generative enhancement, or a trained AI denoiser**. The Denoise slider is a conventional spatial filter.
 
-## Development
-Build on GitHub Actions. For a configured cloud terminal, use JDK 17, Gradle 8.11.1 and Android SDK 35, then run:
+The AI button first benchmarks the phone. Inference must average at most 40 ms at 128x96. AI automatically stops if total CPU-side effect processing exceeds 75 ms for three consecutive frames. GPU completion, thermal behavior and perceived latency still require physical-device testing. Film recipes continue to work without AI.
+
+The trained model is SHA-256 verified during the build:
+`85f36ff88cc504a24af5e0602148bc56a8aa09a58eca8c0da2756f3e8186035e`
+
+Model: https://github.com/onnx/models/tree/main/validated/vision/super_resolution/sub_pixel_cnn_2016
+Runtime: ONNX Runtime Android 1.20.0. Model and runtime license notices are bundled in assets. No network permission or footage upload is used at runtime.
+
+## Sensor ratio / open-gate check
+Frame toggles between 16:9 and the exposed sensor ratio (4:3 or 16:9). Saved output dimensions are shown. A rejected sensor-ratio video configuration returns to 16:9; substituted dimensions are marked unconfirmed.
+
+**A 4:3 output does not establish genuine full-sensor open-gate readout.** Sensor / info shows the active array, reported crop, output dimensions, capture sizes, manual controls and RAW availability for verification. RAW/DNG capture and multi-frame HDR are not implemented.
+
+## Download and install
+Open Actions, choose the latest successful Build Android APK run, and download FILMFORGE-Android. Unzip it and install app-debug.apk on Android 10+.
+This is a development APK. A new development signing key is now cached for later builds; installation over older builds may require uninstalling the old development app.
+
+## Cloud build
+JDK 17, Gradle 8.11.1, Android SDK 35:
 ```sh
 gradle :app:assembleDebug :app:lintDebug
 ```
+The build downloads the exact verified model and bundles the required notices.
 
-## Next
-Grain/halation, manual shutter/ISO/white balance, skin-tone controls and AI enhancement are not implemented yet. Cameras cannot switch mid-recording in this version; stop recording first.
+CI also validates dynamic neural output shapes and finite predictions in Python, and runs Android instrumentation tests for shader compilation/rendering, neural inference and recipe JSON persistence. Camera hardware and supported capture modes cannot be proved by the emulator tests.
 
-## Device acceptance checks
-- Deny camera, retry from Settings; deny only microphone and record a silent clip.
-- Take one photo and record one clip with every recipe; verify Gallery files match the preview.
-- Test both lenses, rotate in photo/video mode, background during recording.
-- Check exposure limits, tap focus, denied/unsupported camera, insufficient storage.
-- Confirm the actual video resolution and frame rate on the Tab A9.
+## Physical-device acceptance
+- Compare Original against each recipe in preview, a saved JPEG and a saved MP4.
+- Front photo: Responsive first, then Detail; move the phone and watch for delayed preview.
+- Change a recipe's grain, halation and denoise; save it and verify it survives restart.
+- Try sensor ratio on both lenses in Photo and Video; check actual saved dimensions.
+- Test supported manual ISO/shutter, WB and focus, then reset to Auto.
+- Benchmark AI, compare it on/off in good light, and check motion, battery use and temperature.
+- Test portrait/landscape rotation, background/return, denied microphone and insufficient storage.
